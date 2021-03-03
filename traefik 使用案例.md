@@ -36,3 +36,31 @@ spec:
       services:
         - name: kubernetes-dashboard
           port: 443
+          
+3.kinaba-ui
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: kibana-ui
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`kibana.xxx.com`)
+      kind: Rule
+      services:
+        - name: kibana-logging  
+          port: 5601
+      middlewares:
+        - name: kibana-replacepathregex #组件提前生成
+          namespace: kube-system
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: kibana-replacepathregex   #跳转组件
+spec:
+  replacePathRegex:
+    regex: ^/api/v1/namespaces/kube-system/services/kibana-logging/proxy/(.*)
+    replacement: /$1
