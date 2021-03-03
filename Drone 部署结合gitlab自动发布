@@ -1,0 +1,234 @@
+kubernetes | 1.16.6 
+
+drone 安装部署
+
+提前配置gitlab
+
+1.gitlab创建OAuth应用
+  创建一个GitLab OAuth应用程序。使用者密钥和使用者密钥用于授权访问GitLab资源
+  授权回调URL必须与以下格式和路径匹配，并且必须使用确切的服务器方案和主机
+  填写名称(name),回调地址(Redirect URI),勾选api与read_user权限
+2.配置gitlab出站请求
+  gitlab 10.6 版本以后为了安全，不允许向本地网络发送webhook请求，如果想向本地网络发送webhook请求，则需要使用管理员帐号登录配置OutBound Request
+  使用管理员账号登录 setting => network => Outbound requests
+  Expand-勾选Allow requests to the local network from web hooks and services
+3.创建一个共享密钥，以验证runner与drone服务器之间的通信
+  # openssl rand -hex 16
+  acebc32bf915a930d2cc718e48df10a8
+
+安装drone-server
+---
+## PV
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: drone
+  labels:
+    app: drone
+spec:
+  capacity:          
+    storage: 5Gi
+  accessModes:       
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+  - hard
+  - nfsvers=4.1
+  nfs:               
+    server: x.x.x.x
+    path: /nfs/drone
+##pvc
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: drone
+  namespace: devops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: nfs
+---
+kind: Deployment
+metadata:
+  name: drone-server
+  namespace: devops
+  labels:
+    app: drone
+    type: server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drone
+      type: server
+  template:
+    metadata:
+      namespace: drones
+      creationTimestamp: null
+      labels:
+        app: drone
+        type: server
+    spec:
+      volumes:
+        - name: drone-data
+          persistentVolumeClaim:
+            claimName: drone-data
+      containers:
+        - name: drone-server
+          image: 'drone/drone:1.10.1' #可以选择新版本试试
+          ports:
+            - containerPort: 80
+              protocol: TCP
+          env:
+            - name: DRONE_GITLAB_CLIENT_ID       # Gitlab Application ID
+              value: af902ab1608fa3ba7f0f18141cea96b821ec1972329033bb9541efa57862aef0 
+            - name: DRONE_GITLAB_CLIENT_SECRET   # Gitlab Secret
+              value: 95cf42171e384fbbc6540dadab0cd8a94851f9c82b611d1ad8d54354309239ff
+            - name: DRONE_RPC_SECRET             # 使用openssl rand -hex 16 创建的一个共享密钥，以验证runner与drone-server之间的通信
+              value: acebc32bf915a930d2cc718e48df10a8
+            - name: DRONE_GITLAB_SERVER          # Gitlab服务器地址
+              value: 'http://gitlab.xxxx.com'
+            - name: DRONE_SERVER_HOST            # drone-server 服务地址
+              value: 'drone.xxxx.com'
+            - name: DRONE_SERVER_PROTO           # drone-server 协议，设置http或https
+              value: http
+            - name: DRONE_GITLAB                 # 使用gitlab
+              value: 'true'
+            - name: DRONE_USER_CREATE            # 给gitlab用户授权为管理员
+              value: 'username:root,admin:true'
+            - name: DRONE_AGENTS_ENABLED         # 是否开启身份验证
+              value: 'true'
+            - name: DRONE_LOGS_TRACE             # 打开日志
+              value: 'true'
+          volumeMounts:
+            - name: drone-data
+              mountPath: /data
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      imagePullSecrets:
+        - name: harbor
+---
+# The service
+apiVersion: v1
+kind: Service
+metadata:
+  name: drone-server-service
+  namespace: devops
+spec:
+  selector:
+    app: drone
+    type: server
+  ports:
+  - port: 80
+    targetPort: 80
+2.安装drone-runner
+  drone启动并运行后，您将需要安装runner程序以执行构建管道
+  rabc.yaml
+  Kubernetes runner程序使用集群内ServiceAccount与Kubernetes API进行通信。在部署到集群时，请确保Kubernetes runner程序与ServiceAccount关联
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: drone
+  namespace: devops
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: devops
+  name: drone
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - create
+  - delete
+  - list
+  - watch
+  - update
+
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: drone
+  namespace: devops
+subjects:
+- kind: ServiceAccount
+  name: drone
+  namespace: demo
+roleRef:
+  kind: Role
+  name: drone
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drone-runner
+  namespace: devops
+  labels:
+    app.kubernetes.io/name: drone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: drone
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: drone
+    spec:
+      imagePullSecrets:
+        - name: harbor
+      serviceAccountName: drone
+      serviceAccount: drone               
+      containers:      
+      - name: runner
+        image: drone/drone-runner-kube:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: DRONE_RPC_HOST               # drone-server 服务地址
+          value: 'drone-server-server'
+        - name: DRONE_RPC_PROTO              # drone-server 服务协议
+          value: http           
+        - name: DRONE_RPC_SECRET             # 使用openssl rand -hex 16 创建的一个共享密钥，以验证runner与drone-server之间的通信
+          value: acebc32bf915a930d2cc718e48df10a8
+        - name: DRONE_NAMESPACE_DEFAULT     #此namespace很重要，不然认证会失败。
+          value: devops
+        - name: DRONE_RUNNER_CAPACITY
+          value: '2'
+        - name: DRONE_RUNNER_NAME
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: drone
+  namespace: devops
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`drone.xxxx.com`)
+      kind: Rule
+      services:
+        - name: drone-server-service
+          port: 80
+ 
+ 访问drone 会跳转到gitlab认证，认证同步后会自动同步项目到drone页面。
+ http://drone.htexam.com 
