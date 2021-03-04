@@ -1,7 +1,11 @@
 kubernetes | 1.16.6
 traefik 2.2
 
+证书创建：kubectl create secret generic secret-tls --from-file=tls.crt --from-file=tls.key -n kube-system
+
 1.traefik-ui
+---
+http
 ---
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
@@ -17,9 +21,28 @@ spec:
         - name: traefik
           port: 8080
       middlewares:
-        - name: redirect-https
-          namespace: kube-system
-
+        - name: redirect-https   #http -> https 需要提前创建
+          namespace: kube-system   
+---
+https
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-ui.htexam.com-tls
+  namespace: kube-system 
+spec:
+  entryPoints:
+    - websecure
+  tls:
+    secretName: htexam-tls 
+    certResolver: default
+  routes:
+    - match: Host(`traefik-ui.htexam.com`)
+      kind: Rule
+      services:
+        - name: traefik
+          port: 8080
 2.dashboard-ui
 ---
 apiVersion: traefik.containo.us/v1alpha1
